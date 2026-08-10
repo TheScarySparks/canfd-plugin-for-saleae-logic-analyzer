@@ -103,7 +103,7 @@ public:
 
   protected: U32 mArbitrationBitRate ;
   protected: U32 mDataBitRate ;
-  protected: U32 mSimulatorRandomSeed ;
+  protected: U32 mSimulatorRandomSeed = 0 ;
   protected: U32 mArbitrationSamplePoint = 75 ;
   protected: U32 mDataSamplePoint = 75 ;
   protected: SimulatorGeneratedBit mSimulatorGeneratedAckSlot = GENERATE_BIT_DOMINANT ;
@@ -111,7 +111,7 @@ public:
   protected: SimulatorGeneratedBit mSimulatorGeneratedBSRSlot = GENERATE_BIT_DOMINANT ;
   protected: SimulatorGeneratedFrameType mSimulatorGeneratedFrameType = GENERATE_ALL_FRAME_TYPES ;
   protected: ProtocolSetting mProtocol = CANFD_ISO_PROTOCOL ;
-  protected: bool mInverted = false ;
+  protected: bool mInverted = true ;
 };
 
 //----------------------------------------------------------------------------------------

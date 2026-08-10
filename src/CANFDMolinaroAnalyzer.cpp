@@ -96,13 +96,13 @@ U32 CANFDMolinaroAnalyzer::GetMinimumSampleRateHz () {
 //----------------------------------------------------------------------------------------
 
 const char* CANFDMolinaroAnalyzer::GetAnalyzerName () const {
-  return "CANFD (Molinaro)";
+  return "CAN FD";
 }
 
 //----------------------------------------------------------------------------------------
 
 const char* GetAnalyzerName () {
-  return "CANFD (Molinaro)";
+  return "CAN FD";
 }
 
 //----------------------------------------------------------------------------------------
@@ -135,7 +135,7 @@ void CANFDMolinaroAnalyzer::enterBit (const bool inBit, U64 & ioBitCenterSampleN
     enterBitInCRC21 (inBit) ;
   }else if ((mConsecutiveBitCountOfSamePolarity == 5) && (mPreviousBit == inBit)) { // Stuff Error
     addMark (ioBitCenterSampleNumber, AnalyzerResults::ErrorX);
-    enterInErrorMode (ioBitCenterSampleNumber + mCurrentSamplesPerBit / 2) ;
+    enterInErrorMode (ioBitCenterSampleNumber + mCurrentSamplesPerBit / 2, ERROR_STUFF) ;
     mConsecutiveBitCountOfSamePolarity += 1 ;
   }else if (mPreviousBit == inBit) {
     mConsecutiveBitCountOfSamePolarity += 1 ;
@@ -234,6 +234,11 @@ void CANFDMolinaroAnalyzer::handle_IDLE_state (const bool inBit, const U64 inBit
     mFieldBitIndex = 0 ;
     mIdentifier = 0 ;
     mStuffBitCount = 0 ;
+    mHaveIdentifier = false ;
+    mHaveCrc = false ;
+    mCrcWidth = 0 ;
+    mHaveAck = false ;
+    mHaveSbc = false ;
     mFrameFieldEngineState = FrameFieldEngineState::IDENTIFIER ;
     mCurrentSamplesPerBit = mSampleRateHz / mSettings->arbitrationBitRate () ;
     mStartOfFieldSampleNumber = inBitCenterSampleNumber + mCurrentSamplesPerBit / 2 ;
@@ -253,26 +258,50 @@ void CANFDMolinaroAnalyzer::handle_IDENTIFIER_state (const bool inBit, const U64
     mIdentifier |= inBit ;
   }else if (mFieldBitIndex == 12) { // RTR or SRR bit
     mFrameType = inBit ? FrameType::remote : FrameType::canData  ;
+    // Remembered rather than marked/closed off immediately: at this point
+    // we don't yet know if this is a base or extended frame (that's the
+    // *next* bit, IDE), so we can't yet draw the correct RTR-vs-SRR mark
+    // or close any bubble -- for an extended frame the identifier isn't
+    // even complete yet.
+    mRtrCenterSampleNumber = inBitCenterSampleNumber ;
   }else if (mFieldBitIndex == 13) { // IDE bit
     mFrameFormat = inBit ? FrameFormat::extended : FrameFormat::base ;
     if (!inBit) { // IDE dominant -> base frame
-    //--- RTR mark
-      addMark (inBitCenterSampleNumber - mCurrentSamplesPerBit,
-               inBit ? AnalyzerResults::UpArrow : AnalyzerResults::DownArrow) ;
+    //--- RTR mark: uses the actually-captured RTR value from bit 12, not
+    //    this bit's (IDE's) value -- the original code drew this using
+    //    `inBit` here, which is always the IDE bit, so the RTR mark never
+    //    reflected the real RTR bit at all.
+      addMark (mRtrCenterSampleNumber,
+               (mFrameType == FrameType::remote) ? AnalyzerResults::UpArrow : AnalyzerResults::DownArrow) ;
     //--- IDE Mark
       addMark (inBitCenterSampleNumber, AnalyzerResults::DownArrow) ;
-    //--- Bubble
+    //--- Bubbles: identifier (ends right before RTR), RTR, IDE -- each its
+    //    own bubble rather than all three bundled together. addBubble's
+    //    end argument is the CENTER of the last bit a bubble is to cover
+    //    (it adds half a bit internally to land on the boundary right
+    //    after that bit).
+      mHaveIdentifier = true ;
       addBubble (STANDARD_IDENTIFIER_FIELD_RESULT,
                  mIdentifier,
                  mFrameType == FrameType::canData, // 0 -> remote, 1 -> data
-                 inBitCenterSampleNumber - mCurrentSamplesPerBit) ;
+                 mRtrCenterSampleNumber - mCurrentSamplesPerBit) ; // ends right before RTR (after bit 11)
+      addBubble (RTR_FIELD_RESULT, mFrameType == FrameType::canData, 0, mRtrCenterSampleNumber) ;
+      addBubble (IDE_FIELD_RESULT, 0, 0, inBitCenterSampleNumber) ;
       mFieldBitIndex = 0 ;
       mFrameFieldEngineState = FrameFieldEngineState::CONTROL_BASE ;
     }else{ // IDE recessive -> extended frame
-    //--- SRR mark
-      addMark (inBitCenterSampleNumber - mCurrentSamplesPerBit, inBit ? AnalyzerResults::One : AnalyzerResults::ErrorSquare) ;
+    //--- SRR mark: same fix as the RTR mark above -- uses the actually-
+    //    captured bit-12 value, not this bit's (IDE's) value.
+      addMark (mRtrCenterSampleNumber,
+               (mFrameType == FrameType::remote) ? AnalyzerResults::One : AnalyzerResults::ErrorSquare) ;
     //--- IDE Mark
       addMark (inBitCenterSampleNumber, AnalyzerResults::UpArrow) ;
+    //--- SRR/IDE centers remembered for later: the identifier bubble stays
+    //    bundled/still-accumulating for now, closed (and split around
+    //    SRR/IDE) once the full 29-bit value is known, at the trailing
+    //    RTR bit below.
+      mSrrCenterSampleNumber = mRtrCenterSampleNumber ;
+      mIdeCenterSampleNumber = inBitCenterSampleNumber ;
     }
   }else if (mFieldBitIndex < 32) { // ID17 ... ID0
     addMark (inBitCenterSampleNumber, AnalyzerResults::Dot);
@@ -281,11 +310,22 @@ void CANFDMolinaroAnalyzer::handle_IDENTIFIER_state (const bool inBit, const U64
   }else{ // RTR
     mFrameType = inBit ? FrameType::remote : FrameType::canData ;
     addMark (inBitCenterSampleNumber, inBit ? AnalyzerResults::UpArrow : AnalyzerResults::DownArrow) ;
-  //--- Bubble
+  //--- The full 29-bit value is known by now, so the identifier bubble is
+  //    split into pieces around SRR and IDE, all showing the same
+  //    complete, correct value -- rather than one monolithic bubble
+  //    spanning the whole identifier plus SRR plus IDE plus RTR.
+    mHaveIdentifier = true ;
     addBubble (EXTENDED_IDENTIFIER_FIELD_RESULT,
                mIdentifier,
                mFrameType == FrameType::canData, // 0 -> remote, 1 -> data
-               inBitCenterSampleNumber) ;
+               mSrrCenterSampleNumber - mCurrentSamplesPerBit) ; // ends right before SRR (after bit 11)
+    addBubble (SRR_FIELD_RESULT, 0, 0, mSrrCenterSampleNumber) ;
+    addBubble (IDE_FIELD_RESULT, 0, 0, mIdeCenterSampleNumber) ;
+    addBubble (EXTENDED_IDENTIFIER_FIELD_RESULT,
+               mIdentifier,
+               mFrameType == FrameType::canData,
+               inBitCenterSampleNumber - mCurrentSamplesPerBit) ; // ends right before the real RTR
+    addBubble (RTR_FIELD_RESULT, mFrameType == FrameType::canData, 0, inBitCenterSampleNumber) ;
     mFieldBitIndex = 0 ;
     mFrameFieldEngineState = FrameFieldEngineState::CONTROL_EXTENDED ;
   }
@@ -297,21 +337,24 @@ void CANFDMolinaroAnalyzer::handle_IDENTIFIER_state (const bool inBit, const U64
 void CANFDMolinaroAnalyzer::handle_CONTROL_BASE_state (const bool inBit, const U64 inBitCenterSampleNumber) {
   enterBitInCRC15 (inBit) ;
   mFieldBitIndex ++ ;
-  if (mFieldBitIndex == 1) { // FDF bit
-    if (inBit) { // FDF recessive -> CANFD frame
+  if (mFieldBitIndex == 1) { // FDF bit -- classic base frame's r0, repurposed by CAN FD
+    if (inBit) { // FDF recessive -> CANFD frame; a genuine r0 bit still follows
       addMark (inBitCenterSampleNumber, AnalyzerResults::UpArrow) ;
       mFrameType = FrameType::canfdData ;
-    }else{
+      addBubble (FDF_FIELD_RESULT, 0, 0, inBitCenterSampleNumber) ;
+    }else{ // FDF dominant -> this bit *is* r0 (base frames have only one reserved bit)
       addMark (inBitCenterSampleNumber, AnalyzerResults::DownArrow) ;
+      addBubble (R0_FIELD_RESULT, 0, 0, inBitCenterSampleNumber) ;
       mFieldBitIndex = 0 ;
       mDataCodeLength = 0 ;
       mFrameFieldEngineState = FrameFieldEngineState::CONTROL_AFTER_R0 ;
     }
   }else if (inBit) { // R0 bit recessive -> error
     addMark (inBitCenterSampleNumber, AnalyzerResults::ErrorDot) ;
-    enterInErrorMode (inBitCenterSampleNumber) ;
+    enterInErrorMode (inBitCenterSampleNumber, ERROR_FORM_R0) ;
   }else{ // R0 dominant: ok
     addMark (inBitCenterSampleNumber, AnalyzerResults::Zero) ;
+    addBubble (R0_FIELD_RESULT, 0, 0, inBitCenterSampleNumber) ;
     mDataCodeLength = 0 ;
     mFieldBitIndex = 0 ;
     mFrameFieldEngineState = FrameFieldEngineState::CONTROL_AFTER_R0 ;
@@ -324,18 +367,21 @@ void CANFDMolinaroAnalyzer::handle_CONTROL_BASE_state (const bool inBit, const U
 void CANFDMolinaroAnalyzer::handle_CONTROL_EXTENDED_state (const bool inBit, const U64 inBitCenterSampleNumber) {
   enterBitInCRC15 (inBit) ;
   mFieldBitIndex ++ ;
-  if (mFieldBitIndex == 1) { // FDF bit
+  if (mFieldBitIndex == 1) { // FDF bit -- classic extended frame's r1, repurposed by CAN FD
     if (inBit) { // FDF recessive -> CANFD frame
       addMark (inBitCenterSampleNumber, AnalyzerResults::UpArrow) ;
       mFrameType = FrameType::canfdData ;
-    }else{
+      addBubble (FDF_FIELD_RESULT, 0, 0, inBitCenterSampleNumber) ;
+    }else{ // FDF dominant -> this bit *is* r1 (classic extended frame); r0 still follows
       addMark (inBitCenterSampleNumber, AnalyzerResults::DownArrow) ;
+      addBubble (R1_FIELD_RESULT, 0, 0, inBitCenterSampleNumber) ;
     }
   }else if (inBit) { // R0 bit recessive -> error
     addMark (inBitCenterSampleNumber, AnalyzerResults::ErrorDot) ;
-    enterInErrorMode (inBitCenterSampleNumber) ;
+    enterInErrorMode (inBitCenterSampleNumber, ERROR_FORM_R0) ;
   }else{ // R0 dominant: ok
     addMark (inBitCenterSampleNumber, AnalyzerResults::Zero) ;
+    addBubble (R0_FIELD_RESULT, 0, 0, inBitCenterSampleNumber) ;
     mDataCodeLength = 0 ;
     mFieldBitIndex = 0 ;
     mFrameFieldEngineState = FrameFieldEngineState::CONTROL_AFTER_R0 ;
@@ -350,6 +396,10 @@ void CANFDMolinaroAnalyzer::handle_CONTROL_AFTER_R0_state (const bool inBit,
   mFieldBitIndex ++ ;
   if (mFrameType == FrameType::canfdData) {
     if (mFieldBitIndex == 1) { // BRS
+    //--- BRS is still sampled at the arbitration bit rate -- captured
+    //    before mCurrentSamplesPerBit potentially switches below, so the
+    //    bubble's own end boundary uses the right bit width.
+      const U64 brsOwnCenter = ioBitCenterSampleNumber ;
       mBRS = inBit ;
       if (inBit) { // Switch to data bit rate
         const U64 samplesForDataBitRate = mSampleRateHz / mSettings->dataBitRate () ;
@@ -360,6 +410,7 @@ void CANFDMolinaroAnalyzer::handle_CONTROL_AFTER_R0_state (const bool inBit,
         ;
         const U64 centerBSR = ioBitCenterSampleNumber - mCurrentSamplesPerBit / 2 + BSRsamplesX100 / 200 ;
         addMark (centerBSR, AnalyzerResults::UpArrow) ;
+        addBubble (BRS_FIELD_RESULT, 1, 0, brsOwnCenter) ;
       //--- Adjust for center of next bit
         ioBitCenterSampleNumber -= mCurrentSamplesPerBit / 2 ; // Returns at the beginning of BRS bit
         ioBitCenterSampleNumber += BSRsamplesX100 / 100 ; // Advance at the beginning of next bit
@@ -369,22 +420,25 @@ void CANFDMolinaroAnalyzer::handle_CONTROL_AFTER_R0_state (const bool inBit,
         mMarkerTypeForDataAndCRC = AnalyzerResults::Square ;
       }else{
         addMark (ioBitCenterSampleNumber, AnalyzerResults::DownArrow) ;
+        addBubble (BRS_FIELD_RESULT, 0, 0, brsOwnCenter) ;
       }
     }else if (mFieldBitIndex == 2) { // ESI
       addMark (ioBitCenterSampleNumber, inBit ? AnalyzerResults::UpArrow : AnalyzerResults::DownArrow) ;
       mESI = inBit ;
+      addBubble (ESI_FIELD_RESULT, inBit, 0, ioBitCenterSampleNumber) ;
     }else{
       addMark (ioBitCenterSampleNumber, mMarkerTypeForDataAndCRC) ;
       mDataCodeLength <<= 1 ;
       mDataCodeLength |= inBit ;
       if (mFieldBitIndex == 6) {
-        const U32 data2 = U32 (mBRS) | (U32 (mESI) << 1) ;
-        addBubble (CANFD_CONTROL_FIELD_RESULT, mDataCodeLength, data2, ioBitCenterSampleNumber) ;
+        addBubble (CANFD_CONTROL_FIELD_RESULT, mDataCodeLength, 0, ioBitCenterSampleNumber) ;
         mFieldBitIndex = 0 ;
         if (mDataCodeLength != 0) {
           mFrameFieldEngineState = FrameFieldEngineState::DATA ;
         }else if (mSettings->protocol () == CANFD_NON_ISO_PROTOCOL) { // No Data, CANFD non ISO
           mCRC17 = mCRC17Accumulator ;
+          mHaveCrc = true ;
+          mCrcWidth = 17 ;
           mUnstuffingActive = false ;
           mFrameFieldEngineState = FrameFieldEngineState::CRC17 ;
         }else{  // No Data, CANFD ISO
@@ -404,6 +458,8 @@ void CANFDMolinaroAnalyzer::handle_CONTROL_AFTER_R0_state (const bool inBit,
         mDataCodeLength = 8 ;
       }
       mCRC15 = mCRC15Accumulator ;
+      mHaveCrc = true ;
+      mCrcWidth = 15 ;
       if (mFrameType == FrameType::remote) {
         mFrameFieldEngineState = FrameFieldEngineState::CRC15 ;
       }else if (mDataCodeLength > 0) {
@@ -431,16 +487,22 @@ void CANFDMolinaroAnalyzer::handle_DATA_state (const bool inBit, const U64 inBit
     mFieldBitIndex = 0 ;
     if (mFrameType != FrameType::canfdData) {
       mCRC15 = mCRC15Accumulator ;
+      mHaveCrc = true ;
+      mCrcWidth = 15 ;
       mFrameFieldEngineState = FrameFieldEngineState::CRC15 ;
     }else if (mSettings->protocol () == CANFD_ISO_PROTOCOL) {
       mFrameFieldEngineState = FrameFieldEngineState::SBC ;
       mUnstuffingActive = false ;
     }else if (mDataCodeLength <= 10) {
       mCRC17 = mCRC17Accumulator ;
+      mHaveCrc = true ;
+      mCrcWidth = 17 ;
       mFrameFieldEngineState = FrameFieldEngineState::CRC17 ;
       mUnstuffingActive = false ;
     }else{
       mCRC21 = mCRC21Accumulator ;
+      mHaveCrc = true ;
+      mCrcWidth = 21 ;
       mFrameFieldEngineState = FrameFieldEngineState::CRC21 ;
       mUnstuffingActive = false ;
     }
@@ -458,7 +520,7 @@ void CANFDMolinaroAnalyzer::handle_CRC15_state (const bool inBit, const U64 inBi
     mFrameFieldEngineState = FrameFieldEngineState::CRCDEL ;
     addBubble (CRC15_FIELD_RESULT, mCRC15, mCRC15Accumulator, inBitCenterSampleNumber) ;
     if (mCRC15Accumulator != 0) {
-      mFrameFieldEngineState = DECODER_ERROR ;
+      enterInErrorMode (inBitCenterSampleNumber, ERROR_CRC15) ;
     }
   }
 }
@@ -471,7 +533,7 @@ void CANFDMolinaroAnalyzer::handle_SBC_state (const bool inBit, const U64 inBitC
     mSBCField = 0 ;
     if (inBit == mPreviousBit) {
       addMark (inBitCenterSampleNumber, AnalyzerResults::ErrorX) ;
-      enterInErrorMode (inBitCenterSampleNumber) ;
+      enterInErrorMode (inBitCenterSampleNumber, ERROR_SBC_STUFF) ;
     }else{
       addMark (inBitCenterSampleNumber, AnalyzerResults::X);
     }
@@ -498,13 +560,20 @@ void CANFDMolinaroAnalyzer::handle_SBC_state (const bool inBit, const U64 inBitC
     addMark (inBitCenterSampleNumber, oneBitCountIsEven ? AnalyzerResults::Dot : AnalyzerResults::ErrorX) ;
     const U32 data2 = ((mStuffBitCount % 8) << 1) | !oneBitCountIsEven ;
     addBubble (SBC_FIELD_RESULT, suffBitCountMod8, data2, inBitCenterSampleNumber) ;
+    mHaveSbc = true ;
+    mSbcStuffBitCount = suffBitCountMod8 ;
+    mSbcOk = oneBitCountIsEven ;
     mUnstuffingActive = false ;
     mFieldBitIndex = 0 ;
     if (mDataCodeLength <= 10) {
       mCRC17 = mCRC17Accumulator ;
+      mHaveCrc = true ;
+      mCrcWidth = 17 ;
       mFrameFieldEngineState = FrameFieldEngineState::CRC17 ;
     }else{
       mCRC21 = mCRC21Accumulator ;
+      mHaveCrc = true ;
+      mCrcWidth = 21 ;
       mFrameFieldEngineState = FrameFieldEngineState::CRC21 ;
     }
   }
@@ -518,7 +587,7 @@ void CANFDMolinaroAnalyzer::handle_CRC17_state (const bool inBit, const U64 inBi
     addMark (inBitCenterSampleNumber, mMarkerTypeForDataAndCRC);
   }else if (inBit == mPreviousBit) {
     addMark (inBitCenterSampleNumber, AnalyzerResults::ErrorX) ;
-    enterInErrorMode (inBitCenterSampleNumber) ;
+    enterInErrorMode (inBitCenterSampleNumber, ERROR_CRC17) ;
   }else{
     addMark (inBitCenterSampleNumber, AnalyzerResults::X);
   }
@@ -538,7 +607,7 @@ void CANFDMolinaroAnalyzer::handle_CRC21_state (const bool inBit, const U64 inBi
     addMark (inBitCenterSampleNumber, mMarkerTypeForDataAndCRC);
   }else if (inBit == mPreviousBit) {
     addMark (inBitCenterSampleNumber, AnalyzerResults::ErrorX) ;
-    enterInErrorMode (inBitCenterSampleNumber) ;
+    enterInErrorMode (inBitCenterSampleNumber, ERROR_CRC21) ;
   }else{
     addMark (inBitCenterSampleNumber, AnalyzerResults::X);
   }
@@ -554,6 +623,12 @@ void CANFDMolinaroAnalyzer::handle_CRC21_state (const bool inBit, const U64 inBi
 
 void CANFDMolinaroAnalyzer::handle_CRCDEL_state (const bool inBit, U64 & ioBitCenterSampleNumber) {
   mUnstuffingActive = false ;
+//--- CRCDEL's own center, captured before ioBitCenterSampleNumber/
+//    mCurrentSamplesPerBit potentially get rewritten below for the
+//    bit-rate switch back to arbitration rate -- used as addBubble's end
+//    argument so the (previously entirely missing) CRC DEL bubble gets the
+//    right width.
+  const U64 crcDelOwnCenter = ioBitCenterSampleNumber ;
   if (inBit) { // Handle Bit Rate Switch: data bit rate -> arbitration bit rate
     const U32 samplesPerArbitrationBit = mSampleRateHz / mSettings->arbitrationBitRate () ;
     const U64 CRCDELsamplesX100 =
@@ -563,6 +638,7 @@ void CANFDMolinaroAnalyzer::handle_CRCDEL_state (const bool inBit, U64 & ioBitCe
     ;
     const U64 centerCRCDEL = ioBitCenterSampleNumber - mCurrentSamplesPerBit / 2 + CRCDELsamplesX100 / 200 ;
     addMark (centerCRCDEL, AnalyzerResults::One) ;
+    addBubble (CRC_DEL_FIELD_RESULT, 0, 0, crcDelOwnCenter) ;
   //--- Adjust for center of next bit
     ioBitCenterSampleNumber -= mCurrentSamplesPerBit / 2 ; // Returns at the beginning of CRCDEL bit
     ioBitCenterSampleNumber += CRCDELsamplesX100 / 100 ; // Advance at the beginning of next bit
@@ -571,7 +647,8 @@ void CANFDMolinaroAnalyzer::handle_CRCDEL_state (const bool inBit, U64 & ioBitCe
     mCurrentSamplesPerBit = samplesPerArbitrationBit ;
   }else{
     addMark (ioBitCenterSampleNumber, AnalyzerResults::ErrorX) ;
-    enterInErrorMode (ioBitCenterSampleNumber) ;
+    addBubble (CRC_DEL_FIELD_RESULT, 0, 0, crcDelOwnCenter) ;
+    enterInErrorMode (ioBitCenterSampleNumber, ERROR_FORM_CRCDEL) ;
   }
   mStartOfFieldSampleNumber = ioBitCenterSampleNumber + mCurrentSamplesPerBit / 2 ;
   mFrameFieldEngineState = FrameFieldEngineState::ACK ;
@@ -584,14 +661,16 @@ void CANFDMolinaroAnalyzer::handle_ACK_state (const bool inBit, const U64 inBitC
   if (mFieldBitIndex == 1) { // ACK SLOT
     addMark (inBitCenterSampleNumber, inBit ? AnalyzerResults::ErrorSquare : AnalyzerResults::DownArrow);
     mAcked = inBit ;
-  }else{ // ACK DELIMITER
+    mHaveAck = true ;
     addBubble (ACK_FIELD_RESULT, mAcked, 0, inBitCenterSampleNumber) ;
+  }else{ // ACK DELIMITER
+    addBubble (ACK_DEL_FIELD_RESULT, 0, 0, inBitCenterSampleNumber) ;
     mFrameFieldEngineState = FrameFieldEngineState::ENDOFFRAME ;
     if (inBit) {
       addMark (inBitCenterSampleNumber, AnalyzerResults::One) ;
     }else{
       addMark (inBitCenterSampleNumber, AnalyzerResults::ErrorDot) ;
-      enterInErrorMode (inBitCenterSampleNumber) ;
+      enterInErrorMode (inBitCenterSampleNumber, ERROR_FORM_ACKDEL) ;
     }
     mFieldBitIndex = 0 ;
   }
@@ -604,7 +683,7 @@ void CANFDMolinaroAnalyzer::handle_ENDOFFRAME_state (const bool inBit, const U64
     addMark (inBitCenterSampleNumber, AnalyzerResults::One) ;
   }else{
     addMark (inBitCenterSampleNumber, AnalyzerResults::ErrorX) ;
-    enterInErrorMode (inBitCenterSampleNumber) ;
+    enterInErrorMode (inBitCenterSampleNumber, ERROR_FORM_EOF) ;
   }
   mFieldBitIndex ++ ;
   if (mFieldBitIndex == 7) {
@@ -621,11 +700,12 @@ void CANFDMolinaroAnalyzer::handle_INTERMISSION_state (const bool inBit, const U
     addMark (inBitCenterSampleNumber, AnalyzerResults::One) ;
   }else{
     addMark (inBitCenterSampleNumber, AnalyzerResults::ErrorX) ;
-    enterInErrorMode (inBitCenterSampleNumber) ;
+    enterInErrorMode (inBitCenterSampleNumber, ERROR_FORM_INTERMISSION) ;
   }
   mFieldBitIndex ++ ;
   if (mFieldBitIndex == 3) {
     addBubble (INTERMISSION_FIELD_RESULT, 0, 0, inBitCenterSampleNumber) ;
+    emitConsolidatedFrameV2 (inBitCenterSampleNumber, false) ;
     mFieldBitIndex = 0 ;
     mFrameFieldEngineState = FrameFieldEngineState::IDLE ;
   }
@@ -642,7 +722,8 @@ void CANFDMolinaroAnalyzer::handle_DECODER_ERROR_state (const bool inBit, const 
   }else if (inBit) {
     mConsecutiveBitCountOfSamePolarity += 1 ;
     if (mConsecutiveBitCountOfSamePolarity == 11) {
-      addBubble (CAN_ERROR_RESULT, 0, 0, inBitCenterSampleNumber) ;
+      addBubble (CAN_ERROR_RESULT, mErrorReason, 0, inBitCenterSampleNumber) ;
+      emitConsolidatedFrameV2 (inBitCenterSampleNumber, true) ;
       mFrameFieldEngineState = FrameFieldEngineState::IDLE ;
     }
   }
@@ -697,6 +778,13 @@ void CANFDMolinaroAnalyzer::addBubble (const U8 inBubbleType,
                                        const U64 inData1,
                                        const U64 inData2,
                                        const U64 inBitCenterSampleNumber) {
+//--- Old-style Frame: drives the per-field waveform bubble/tabular text
+//    (GenerateText in CANFDMolinaroAnalyzerResults.cpp switches on
+//    frame.mType) -- kept exactly as before, still positioned precisely at
+//    each field's own bit location on the trace. The FrameV2 side (Data
+//    Table) is handled separately now, once per whole message, by
+//    emitConsolidatedFrameV2() -- see its call sites in
+//    handle_INTERMISSION_state and handle_DECODER_ERROR_state.
   Frame frame ;
   frame.mType = inBubbleType ;
   frame.mFlags = 0 ;
@@ -707,79 +795,6 @@ void CANFDMolinaroAnalyzer::addBubble (const U8 inBubbleType,
   frame.mEndingSampleInclusive = endSampleNumber ;
   mResults->AddFrame (frame) ;
 
-  FrameV2 frameV2 ;
-  switch (inBubbleType) {
-  case STANDARD_IDENTIFIER_FIELD_RESULT :
-    { const U8 idf [2] = { U8 (inData1 >> 8), U8 (inData1) } ;
-      frameV2.AddByteArray ("Value", idf, 2) ;
-      mResults->AddFrameV2 (frameV2, "Std Idf", mStartOfFieldSampleNumber, endSampleNumber) ;
-    }
-    break ;
-  case EXTENDED_IDENTIFIER_FIELD_RESULT :
-    { const U8 idf [4] = {
-        U8 (inData1 >> 24), U8 (inData1 >> 16), U8 (inData1 >> 8), U8 (inData1)
-      } ;
-      frameV2.AddByteArray ("Value", idf, 4) ;
-      mResults->AddFrameV2 (frameV2, "Ext Idf", mStartOfFieldSampleNumber, endSampleNumber) ;
-    }
-    break ;
-  case CAN20B_CONTROL_FIELD_RESULT :
-    frameV2.AddByte ("Value", inData1) ;
-    mResults->AddFrameV2 (frameV2, "Ctrl", mStartOfFieldSampleNumber, endSampleNumber) ;
-    break ;
-  case CANFD_CONTROL_FIELD_RESULT :
-    { frameV2.AddByte ("Value", inData1) ;
-      std::stringstream str ;
-      str << "Ctrl (FDF" ;
-      if ((inData2 & 1) != 0) {
-        str << ", BRS" ;
-      }
-      if ((inData2 & 2) != 0) {
-        str << ", ESI" ;
-      }
-      str << ")" ;
-      mResults->AddFrameV2 (frameV2, str.str ().c_str (), mStartOfFieldSampleNumber, endSampleNumber) ;
-    }
-    break ;
-  case DATA_FIELD_RESULT :
-    { frameV2.AddByte ("Value", inData1) ;
-      std::stringstream str ;
-      str << "D" << inData2 ;
-      mResults->AddFrameV2 (frameV2, str.str ().c_str (), mStartOfFieldSampleNumber, endSampleNumber) ;
-    }
-    break ;
-  case CRC15_FIELD_RESULT :
-    { const U8 crc [2] = { U8 (inData1 >> 8), U8 (inData1) } ;
-      frameV2.AddByteArray ("Value", crc, 2) ;
-      mResults->AddFrameV2 (frameV2, "CRC15", mStartOfFieldSampleNumber, endSampleNumber) ;
-    }
-    break ;
-  case CRC17_FIELD_RESULT :
-    { const U8 crc [3] = { U8 (inData1 >> 16), U8 (inData1 >> 8), U8 (inData1) } ;
-      frameV2.AddByteArray ("Value", crc, 3) ;
-      mResults->AddFrameV2 (frameV2, "CRC17", mStartOfFieldSampleNumber, endSampleNumber) ;
-    }
-    break ;
-  case CRC21_FIELD_RESULT :
-    { const U8 crc [3] = { U8 (inData1 >> 16), U8 (inData1 >> 8), U8 (inData1) } ;
-      frameV2.AddByteArray ("Value", crc, 3) ;
-      mResults->AddFrameV2 (frameV2, "CRC21", mStartOfFieldSampleNumber, endSampleNumber) ;
-    }
-    break ;
-  case ACK_FIELD_RESULT :
-    mResults->AddFrameV2 (frameV2, "ACK", mStartOfFieldSampleNumber, endSampleNumber) ;
-    break ;
-  case EOF_FIELD_RESULT :
-    mResults->AddFrameV2 (frameV2, "EOF", mStartOfFieldSampleNumber, endSampleNumber) ;
-    break ;
-  case INTERMISSION_FIELD_RESULT :
-    mResults->AddFrameV2 (frameV2, "IFS", mStartOfFieldSampleNumber, endSampleNumber) ;
-    break ;
-  case CAN_ERROR_RESULT :
-    mResults->AddFrameV2 (frameV2, "Error", mStartOfFieldSampleNumber, endSampleNumber) ;
-    break ;
-  }
-
   mResults->CommitResults () ;
   ReportProgress (frame.mEndingSampleInclusive) ;
 //--- Prepare for next bubble
@@ -788,11 +803,118 @@ void CANFDMolinaroAnalyzer::addBubble (const U8 inBubbleType,
 
 //----------------------------------------------------------------------------------------
 
-void CANFDMolinaroAnalyzer::enterInErrorMode (const U64 inBitCenterSampleNumber) {
+static std::string formatHex (const uint32_t inValue) {
+  char buffer [16] ;
+  snprintf (buffer, sizeof (buffer), "0x%X", inValue) ;
+  return std::string (buffer) ;
+}
+
+//----------------------------------------------------------------------------------------
+
+static std::string formatCrc (const U32 inValue, const U8 inWidthBits) {
+  char buffer [16] ;
+  const int hexDigits = (inWidthBits + 3) / 4 ;
+  snprintf (buffer, sizeof (buffer), "0x%0*X", hexDigits, inValue) ;
+  return std::string (buffer) ;
+}
+
+//----------------------------------------------------------------------------------------
+
+static std::string formatData (const uint8_t * inData, const int inLength) {
+  std::string result ;
+  char buffer [8] ;
+  for (int i=0 ; i<inLength ; i++) {
+    if (i > 0) {
+      result += ' ' ;
+    }
+    snprintf (buffer, sizeof (buffer), "%02X", inData [i]) ;
+    result += buffer ;
+  }
+  return result ;
+}
+
+//----------------------------------------------------------------------------------------
+//  One Data Table row per CAN/CAN FD message, mirroring the sibling
+//  classic CAN 2.0B plugin's consolidated row (ID, CAN-TYPE, RTR, DLC,
+//  DATA, CRC, CRC-OK, ACK, LENGTH, STUFFBITS), extended with the fields
+//  unique to CAN FD (FDF, BRS, ESI, SBC/SBC-OK -- ISO frames only). Fields
+//  for sub-parts of the message that were never reached (e.g. an error
+//  before ACK) are simply omitted, same convention the classic plugin
+//  uses -- "ID" falls back to "?" only when even the identifier was never
+//  captured.
+//----------------------------------------------------------------------------------------
+
+void CANFDMolinaroAnalyzer::emitConsolidatedFrameV2 (const U64 inEndSampleNumber, const bool inError) {
+  FrameV2 frameV2 ;
+  if (inError) {
+    frameV2.AddString ("ERROR", CanErrorReasonText (mErrorReason)) ;
+  }
+  if (mHaveIdentifier) {
+    frameV2.AddString ("ID", formatHex (mIdentifier).c_str ()) ;
+    frameV2.AddString ("CAN-TYPE", (mFrameFormat == FrameFormat::extended) ? "EXT" : "STD") ;
+    frameV2.AddBoolean ("RTR", mFrameType == FrameType::remote) ;
+    frameV2.AddBoolean ("FDF", mFrameType == FrameType::canfdData) ;
+    if (mFrameType == FrameType::canfdData) {
+      frameV2.AddBoolean ("BRS", mBRS) ;
+      frameV2.AddBoolean ("ESI", mESI) ;
+    }
+  //--- mDataCodeLength holds the raw DLC nibble (0-15) for CAN FD frames --
+  //    an index into CANFD_LENGTH[], not a byte count -- and the already-
+  //    clamped (0-8) byte count for classic-format frames.
+    const U32 dlcByteCount = (mFrameType == FrameType::canfdData)
+      ? CANFD_LENGTH [mDataCodeLength]
+      : mDataCodeLength ;
+    frameV2.AddString ("DLC", std::to_string (dlcByteCount).c_str ()) ;
+    const std::string dataStr = (mFrameType == FrameType::remote)
+      ? std::string ()
+      : formatData (mData, dlcByteCount) ;
+    frameV2.AddString ("DATA", dataStr.c_str ()) ;
+  }else{
+    frameV2.AddString ("ID", "?") ;
+  }
+  if (mHaveCrc) {
+    U32 crcValue = 0 ;
+    U32 crcAccumulator = 0 ;
+    switch (mCrcWidth) {
+    case 15 : crcValue = mCRC15 ; crcAccumulator = mCRC15Accumulator ; break ;
+    case 17 : crcValue = mCRC17 ; crcAccumulator = mCRC17Accumulator ; break ;
+    case 21 : crcValue = mCRC21 ; crcAccumulator = mCRC21Accumulator ; break ;
+    }
+    std::stringstream crcLabel ;
+    crcLabel << "CRC" << U32 (mCrcWidth) ;
+    frameV2.AddString (crcLabel.str ().c_str (), formatCrc (crcValue, mCrcWidth).c_str ()) ;
+    frameV2.AddBoolean ("CRC-OK", crcAccumulator == 0) ;
+  }
+  if (mHaveSbc) {
+    frameV2.AddString ("SBC", std::to_string (mSbcStuffBitCount).c_str ()) ;
+    frameV2.AddBoolean ("SBC-OK", mSbcOk) ;
+  }
+  if (mHaveAck) {
+    frameV2.AddBoolean ("ACK", ! mAcked) ; // mAcked holds the raw (recessive = NOT acked) bit
+  }
+//--- Frame duration -- reported in microseconds rather than a bit count.
+//    The sibling classic CAN 2.0B plugin reports a bit count (sample
+//    count / one fixed bit width), which works because classic frames
+//    never change bit rate. CAN FD frames can run at two different rates
+//    (arbitration and data, switched via BRS), so that same division
+//    would give a meaningless number here -- duration stays correct
+//    regardless of how many rate switches happened.
+  const U64 frameSampleCount = inEndSampleNumber - mStartOfFrameSampleNumber ;
+  const U64 frameDurationUs = (frameSampleCount * 1000000) / mSampleRateHz ;
+  frameV2.AddString ("LENGTH", (std::to_string (frameDurationUs) + " us").c_str ()) ;
+  frameV2.AddString ("STUFFBITS", std::to_string (mStuffBitCount).c_str ()) ;
+  mResults->AddFrameV2 (frameV2, "CAN Frame", mStartOfFrameSampleNumber, inEndSampleNumber) ;
+  mResults->CommitResults () ;
+}
+
+//----------------------------------------------------------------------------------------
+
+void CANFDMolinaroAnalyzer::enterInErrorMode (const U64 inBitCenterSampleNumber, const CanErrorReason inReason) {
   mStartOfFieldSampleNumber = inBitCenterSampleNumber ;
   mCurrentSamplesPerBit = mSampleRateHz / mSettings->arbitrationBitRate () ;
   mFrameFieldEngineState = DECODER_ERROR ;
   mUnstuffingActive = false ;
+  mErrorReason = inReason ;
 }
 
 //----------------------------------------------------------------------------------------

@@ -5,10 +5,10 @@
 
 CANFDMolinaroAnalyzerSettings::CANFDMolinaroAnalyzerSettings() :
 mInputChannel (UNDEFINED_CHANNEL),
-mArbitrationBitRate (125 * 1000),
-mDataBitRate (500 * 1000) {
+mArbitrationBitRate (1000 * 1000),
+mDataBitRate (1000 * 1000) {
   mInputChannelInterface.reset (new AnalyzerSettingInterfaceChannel ());
-  mInputChannelInterface->SetTitleAndTooltip ("Serial", "Standard Molinaro's CAN");
+  mInputChannelInterface->SetTitleAndTooltip ("Serial", "CAN FD");
   mInputChannelInterface->SetChannel (mInputChannel);
 
 //--- Arbitration Bit Rate
@@ -63,6 +63,7 @@ mDataBitRate (500 * 1000) {
   mCanChannelInvertedInterface->AddNumber (1.0,
                                            "High",
                                            "High is the inverted dominant level") ;
+  mCanChannelInvertedInterface->SetNumber (1.0) ;
 
 //--- Add Protocol
   mProtocolInterface.reset (new AnalyzerSettingInterfaceNumberList ( )) ;
@@ -178,7 +179,7 @@ bool CANFDMolinaroAnalyzerSettings::SetSettingsFromInterfaces () {
     = SimulatorGeneratedBit (mSimulatorESIGenerationInterface->GetNumber ()) ;
 
   ClearChannels();
-  AddChannel (mInputChannel, "CANFD", true) ;
+  AddChannel (mInputChannel, "CAN FD", true) ;
 
   return true;
 }
@@ -230,7 +231,7 @@ void CANFDMolinaroAnalyzerSettings::LoadSettings (const char* settings) {
   mSimulatorGeneratedBSRSlot = SimulatorGeneratedBit (value) ;
 
   ClearChannels();
-  AddChannel( mInputChannel, "CANFD (Molinaro)", true );
+  AddChannel( mInputChannel, "CAN FD", true );
 
   UpdateInterfacesFromSettings();
 }
