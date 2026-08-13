@@ -410,7 +410,16 @@ void CANFDMolinaroAnalyzer::handle_CONTROL_AFTER_R0_state (const bool inBit,
         ;
         const U64 centerBSR = ioBitCenterSampleNumber - mCurrentSamplesPerBit / 2 + BSRsamplesX100 / 200 ;
         addMark (centerBSR, AnalyzerResults::UpArrow) ;
-        addBubble (BRS_FIELD_RESULT, 1, 0, brsOwnCenter) ;
+      //--- BRS bubble ends at the actual bit-rate-switch resync boundary
+      //    ("beginning of next bit", computed the same way the timing
+      //    adjustment below does) -- NOT one full arbitration-bit width
+      //    after BRS's own center. Those two disagree by a lot once the
+      //    data rate is much faster than arbitration, and using the naive
+      //    boundary made the BRS bubble stretch out far enough to swallow
+      //    ESI's bubble entirely (ESI ends up with a start sample past its
+      //    end sample, which Logic 2 silently doesn't draw).
+        const U64 resyncBoundary = ioBitCenterSampleNumber - mCurrentSamplesPerBit / 2 + BSRsamplesX100 / 100 ;
+        addBubble (BRS_FIELD_RESULT, 1, 0, resyncBoundary - mCurrentSamplesPerBit / 2) ;
       //--- Adjust for center of next bit
         ioBitCenterSampleNumber -= mCurrentSamplesPerBit / 2 ; // Returns at the beginning of BRS bit
         ioBitCenterSampleNumber += BSRsamplesX100 / 100 ; // Advance at the beginning of next bit
@@ -562,7 +571,13 @@ void CANFDMolinaroAnalyzer::handle_SBC_state (const bool inBit, const U64 inBitC
     addBubble (SBC_FIELD_RESULT, suffBitCountMod8, data2, inBitCenterSampleNumber) ;
     mHaveSbc = true ;
     mSbcStuffBitCount = suffBitCountMod8 ;
-    mSbcOk = oneBitCountIsEven ;
+  //--- SBC-OK requires BOTH checks to pass: parity, and that the
+  //    transmitter's declared count (suffBitCountMod8, mod 8 since it's
+  //    only a 3-bit field) agrees with what we independently counted
+  //    (mStuffBitCount, frozen since the end of the data field). Parity
+  //    alone -- what this used to be -- can't catch a genuine stuff-count
+  //    disagreement, which is the exact failure SBC exists to catch.
+    mSbcOk = oneBitCountIsEven && (suffBitCountMod8 == (mStuffBitCount % 8)) ;
     mUnstuffingActive = false ;
     mFieldBitIndex = 0 ;
     if (mDataCodeLength <= 10) {
@@ -638,7 +653,14 @@ void CANFDMolinaroAnalyzer::handle_CRCDEL_state (const bool inBit, U64 & ioBitCe
     ;
     const U64 centerCRCDEL = ioBitCenterSampleNumber - mCurrentSamplesPerBit / 2 + CRCDELsamplesX100 / 200 ;
     addMark (centerCRCDEL, AnalyzerResults::One) ;
-    addBubble (CRC_DEL_FIELD_RESULT, 0, 0, crcDelOwnCenter) ;
+  //--- Same fix as the mirror-image BRS bubble in
+  //    handle_CONTROL_AFTER_R0_state: end at the actual resync boundary
+  //    ("beginning of next bit" below), not one full data-bit width after
+  //    CRCDEL's own center -- here that made the bubble too NARROW rather
+  //    than too wide (data rate is the faster of the two), leaving an
+  //    unlabeled gap before ACK's bubble instead of an overlap.
+    const U64 resyncBoundary = ioBitCenterSampleNumber - mCurrentSamplesPerBit / 2 + CRCDELsamplesX100 / 100 ;
+    addBubble (CRC_DEL_FIELD_RESULT, 0, 0, resyncBoundary - mCurrentSamplesPerBit / 2) ;
   //--- Adjust for center of next bit
     ioBitCenterSampleNumber -= mCurrentSamplesPerBit / 2 ; // Returns at the beginning of CRCDEL bit
     ioBitCenterSampleNumber += CRCDELsamplesX100 / 100 ; // Advance at the beginning of next bit
@@ -846,9 +868,11 @@ static std::string formatData (const uint8_t * inData, const int inLength) {
 
 void CANFDMolinaroAnalyzer::emitConsolidatedFrameV2 (const U64 inEndSampleNumber, const bool inError) {
   FrameV2 frameV2 ;
-  if (inError) {
-    frameV2.AddString ("ERROR", CanErrorReasonText (mErrorReason)) ;
-  }
+//--- ERROR is always present (blank for a clean frame) rather than only
+//    added when inError is true -- so it's one reliable column to scan or
+//    filter on across every row, instead of only showing up on whichever
+//    rows happened to error.
+  frameV2.AddString ("ERROR", inError ? CanErrorReasonText (mErrorReason) : "") ;
   if (mHaveIdentifier) {
     frameV2.AddString ("ID", formatHex (mIdentifier).c_str ()) ;
     frameV2.AddString ("CAN-TYPE", (mFrameFormat == FrameFormat::extended) ? "EXT" : "STD") ;
