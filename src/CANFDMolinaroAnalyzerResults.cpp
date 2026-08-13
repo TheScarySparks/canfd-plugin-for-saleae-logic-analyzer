@@ -8,6 +8,33 @@
 
 //----------------------------------------------------------------------------------------
 
+const char* CanErrorReasonText (CanErrorReason inReason) {
+  switch (inReason) {
+  case ERROR_STUFF : return "Stuff Error" ;
+  case ERROR_FORM_R0 : return "Form Error (R0)" ;
+  case ERROR_FORM_R1 : return "Form Error (R1)" ;
+  case ERROR_FORM_CRCDEL : return "Form Error (CRC Delimiter)" ;
+  case ERROR_FORM_ACKDEL : return "Form Error (ACK Delimiter)" ;
+  case ERROR_FORM_EOF : return "Form Error (EOF)" ;
+  case ERROR_FORM_INTERMISSION : return "Form Error (Intermission)" ;
+  case ERROR_CRC15 : return "CRC Error (CRC15)" ;
+  case ERROR_CRC17 : return "CRC Error (CRC17)" ;
+  case ERROR_CRC21 : return "CRC Error (CRC21)" ;
+  case ERROR_SBC_STUFF : return "Stuff Error (SBC)" ;
+  default : return "Error" ;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//  Mirrors CANFD_LENGTH in CANFDMolinaroAnalyzer.cpp (kept as a separate
+//  copy since that one has internal linkage) -- DLC nibble (0-15) to
+//  actual CAN FD payload byte count.
+//----------------------------------------------------------------------------------------
+
+static const uint8_t CANFD_LENGTH [16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64} ;
+
+//----------------------------------------------------------------------------------------
+
 CANFDMolinaroAnalyzerResults::CANFDMolinaroAnalyzerResults (CANFDMolinaroAnalyzer* analyzer,
                                                             CANFDMolinaroAnalyzerSettings* settings ) :
 AnalyzerResults(),
@@ -29,37 +56,66 @@ void CANFDMolinaroAnalyzerResults::GenerateText (const Frame & inFrame,
   char numberString [128] = "" ;
   switch (inFrame.mType) {
   case STANDARD_IDENTIFIER_FIELD_RESULT :
-//    AnalyzerHelpers::GetNumberString (inFrame.mData1, inDisplayBase, 12, numberString, 128);
     snprintf (numberString, 128, "0x%03llX", inFrame.mData1) ;
-    ioText << ((inFrame.mData2 == 0) ? "Std Remote idf: " : "Std Data idf: ") ;
-    ioText << numberString ;
-    ioText << "\n" ;
+    ioText << "STD ID: " << numberString << "\n" ;
     break ;
   case EXTENDED_IDENTIFIER_FIELD_RESULT :
-//     AnalyzerHelpers::GetNumberString (inFrame.mData1, inDisplayBase, 32, numberString, 128);
     snprintf (numberString, 128, "0x%08llX", inFrame.mData1) ;
-    ioText << ((inFrame.mData2 == 0) ? "Ext Remote idf: " : "Ext Data idf: ") ;
-    ioText << numberString ;
-    ioText << "\n" ;
+    ioText << "EXT ID: " << numberString << "\n" ;
+    break ;
+  case RTR_FIELD_RESULT :
+    if (inBubbleText) {
+      ioText << ((inFrame.mData1 == 0) ? "RTR: True\n" : "RTR: False\n") ;
+    }
+    break ;
+  case SRR_FIELD_RESULT :
+    if (inBubbleText) {
+      ioText << "SRR\n" ;
+    }
+    break ;
+  case IDE_FIELD_RESULT :
+    if (inBubbleText) {
+      ioText << "IDE\n" ;
+    }
+    break ;
+  case R0_FIELD_RESULT :
+    if (inBubbleText) {
+      ioText << "R0\n" ;
+    }
+    break ;
+  case R1_FIELD_RESULT :
+    if (inBubbleText) {
+      ioText << "R1\n" ;
+    }
+    break ;
+  case FDF_FIELD_RESULT :
+    if (inBubbleText) {
+      ioText << "FDF\n" ;
+    }
+    break ;
+  case BRS_FIELD_RESULT :
+    if (inBubbleText) {
+      ioText << ((inFrame.mData1 != 0) ? "BRS: True\n" : "BRS: False\n") ;
+    }
+    break ;
+  case ESI_FIELD_RESULT :
+    if (inBubbleText) {
+      ioText << ((inFrame.mData1 != 0) ? "ESI: True\n" : "ESI: False\n") ;
+    }
     break ;
   case CAN20B_CONTROL_FIELD_RESULT :
     if (!inBubbleText) {
       ioText << "  " ;
     }
-    ioText << "Ctrl: " << inFrame.mData1 << "\n" ;
+    ioText << "DLC: " << inFrame.mData1 << "\n" ;
     break ;
   case CANFD_CONTROL_FIELD_RESULT :
-    if (!inBubbleText) {
-      ioText << "  " ;
+    { if (!inBubbleText) {
+        ioText << "  " ;
+      }
+      const uint8_t dlcIndex = (inFrame.mData1 < 16) ? uint8_t (inFrame.mData1) : uint8_t (15) ;
+      ioText << "DLC: " << U32 (CANFD_LENGTH [dlcIndex]) << "\n" ;
     }
-    ioText << "Ctrl: " << inFrame.mData1 << " (FDF" ;
-    if ((inFrame.mData2 & 1) != 0) {
-      ioText << ", BRS" ;
-    }
-    if ((inFrame.mData2 & 2) != 0) {
-      ioText << ", ESI" ;
-    }
-    ioText << ")\n" ;
     break ;
   case DATA_FIELD_RESULT :
     if (!inBubbleText) {
@@ -114,6 +170,16 @@ void CANFDMolinaroAnalyzerResults::GenerateText (const Frame & inFrame,
       }
     }
     break ;
+  case ACK_DEL_FIELD_RESULT :
+    if (inBubbleText) {
+      ioText << "ACK DEL\n" ;
+    }
+    break ;
+  case CRC_DEL_FIELD_RESULT :
+    if (inBubbleText) {
+      ioText << "CRC DEL\n" ;
+    }
+    break ;
   case SBC_FIELD_RESULT :
     { const bool parityError = (inFrame.mData2 & 1) != 0 ;
       const bool stuffBitCountError = (inFrame.mData2 >> 1) != inFrame.mData1 ;
@@ -132,13 +198,16 @@ void CANFDMolinaroAnalyzerResults::GenerateText (const Frame & inFrame,
     } break ;
   case EOF_FIELD_RESULT :
     if (inBubbleText) {
-      ioText << "EOF\n" ;
+      ioText << "End of Frame\n" ;
     }
     break ;
   case INTERMISSION_FIELD_RESULT :
     if (inBubbleText) {
-      ioText << "IFS\n" ;
+      ioText << "3-bit intermission\n" ;
     }
+    break ;
+  case CAN_ERROR_RESULT :
+    ioText << CanErrorReasonText (CanErrorReason (inFrame.mData1)) << "\n" ;
     break ;
   default :
     if (!inBubbleText) {
@@ -165,15 +234,15 @@ void CANFDMolinaroAnalyzerResults::GenerateBubbleText (const U64 inFrameIndex,
 
 void CANFDMolinaroAnalyzerResults::GenerateFrameTabularText (const U64 inFrameIndex,
                                                            const DisplayBase inDisplayBase) {
-  #ifdef SUPPORTS_PROTOCOL_SEARCH
-    const Frame frame = GetFrame (inFrameIndex) ;
-    std::stringstream text ;
-    GenerateText (frame, inDisplayBase, false, text) ;
-    ClearTabularText () ;
-    if (text.str().length () > 0) {
-      AddTabularText (text.str().c_str ()) ;
-    }
-  #endif
+  // Per-field Frame objects are kept only to position the waveform bubbles
+  // (GenerateBubbleText, above, is untouched and still uses them). The
+  // Data Table is fully covered by the one consolidated FrameV2 row per
+  // message (emitConsolidatedFrameV2 in CANFDMolinaroAnalyzer.cpp), so
+  // this used to just be redundant clutter -- a generic "Value" column
+  // showing per-field text (raw ID, each individual data byte, etc.)
+  // alongside the properly named FrameV2 columns that already cover the
+  // same data.
+  ClearTabularText () ;
 }
 
 //----------------------------------------------------------------------------------------

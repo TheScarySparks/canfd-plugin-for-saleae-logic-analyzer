@@ -527,8 +527,16 @@ U32 CANMolinaroSimulationDataGenerator::GenerateSimulationData
   mSerialSimulationData.Advance (samplesPerArbitrationBitRate * 11) ;
   mSerialSimulationData.TransitionIfNeeded (inverted ? BIT_HIGH : BIT_LOW) ;  // Edge for SOF bit
 
+//--- Realistic inter-frame gap: back-to-back frames separated only by the
+//    mandatory 3-bit Intermission field understate real bus behavior --
+//    actual controllers have processing/arbitration overhead before
+//    transmitting the next frame. ~16 us of additional idle time between
+//    frames, same fix already applied to the classic CAN 2.0B plugin.
+  const U32 interFrameGapSamples = U32 ((uint64_t (mSimulationSampleRateHz) * 16) / 1000000) ;
+
   while (mSerialSimulationData.GetCurrentSampleNumber() < adjusted_largest_sample_requested) {
     createCANFrame (samplesPerArbitrationBitRate, inverted) ;
+    mSerialSimulationData.Advance (interFrameGapSamples) ;
   }
 
   *simulation_channel = &mSerialSimulationData;
@@ -690,7 +698,10 @@ void CANMolinaroSimulationDataGenerator::createBaseCANFrame (const U32 inSamples
   const FrameType type = inRemote ? FrameType::remoteFrame : FrameType::dataFrame ;
   const uint32_t identifier = uint32_t (pseudoRandomValue ()) & (inExtended ? 0x1FFFFFFF : 0x7FF) ;
   const uint8_t dataLength = uint8_t (pseudoRandomValue ()) % 9 ;
-  if (! remoteFrame) {
+  if (! inRemote) { // was "! remoteFrame", which always evaluated true (a
+                     // shadowed enum value, not the inRemote parameter) --
+                     // meaning remote frames never actually skipped filling
+                     // data[] with random bytes they shouldn't carry
     for (uint32_t i=0 ; i<dataLength ; i++) {
       data [i] = uint8_t (pseudoRandomValue ()) ;
     }

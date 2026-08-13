@@ -83,6 +83,41 @@ class ANALYZER_EXPORT CANFDMolinaroAnalyzer : public Analyzer2 {
   private: bool mAcked ;
   private: AnalyzerResults::MarkerType mMarkerTypeForDataAndCRC ;
 
+//--- RTR/SRR's own center sample, captured at bit 12 (shared slot -- RTR
+//    for base-format frames, SRR for extended) so it can be split into its
+//    own bubble later, when the identifier bubble it used to be lumped
+//    into is finally closed. addBubble's end argument is the CENTER of the
+//    last bit a bubble is to cover (it adds half a bit internally to land
+//    on the boundary right after that bit) -- so these are plain bit
+//    centers, not boundaries, matching every other call site in this file.
+//    Reused for the *real* trailing RTR bit on the extended path (bit 32)
+//    once the base-path use is done with it.
+  private: U64 mRtrCenterSampleNumber ;
+
+//--- SRR's own center specifically (extended frames only), copied out of
+//    mRtrCenterSampleNumber before that gets reused for the real trailing
+//    RTR bit. Held onto until the identifier value is fully known (at that
+//    trailing RTR bit), so the identifier bubble can be split into pieces
+//    around SRR and IDE with the same complete, correct value shown in
+//    every piece.
+  private: U64 mSrrCenterSampleNumber ;
+
+//--- IDE's own center sample (extended frames only).
+  private: U64 mIdeCenterSampleNumber ;
+
+//--- Tracks how far the current frame got, and which CRC width was
+//    actually used, for the consolidated FrameV2 row (a frame that errors
+//    out partway through still gets one row, with whichever fields were
+//    actually captured before the error).
+  private: bool mHaveIdentifier ;
+  private: bool mHaveCrc ;
+  private: U8 mCrcWidth ; // 0 = none yet, else 15/17/21
+  private: bool mHaveAck ;
+  private: bool mHaveSbc ;
+  private: U8 mSbcStuffBitCount ;
+  private: bool mSbcOk ;
+  private: CanErrorReason mErrorReason ;
+
 //---------------- CAN decoder methods
   private: void enterBit (const bool inBit, U64 & ioBitCenterSampleNumber) ;
   private: void decodeFrameBit (const bool inBit, U64 & ioBitCenterSampleNumber) ;
@@ -94,7 +129,8 @@ class ANALYZER_EXPORT CANFDMolinaroAnalyzer : public Analyzer2 {
                            const U64 inData1,
                            const U64 inData2,
                            const U64 inEndSampleNumber) ;
-  private: void enterInErrorMode (const U64 inBitCenterSampleNumber) ;
+  private: void emitConsolidatedFrameV2 (const U64 inEndSampleNumber, const bool inError) ;
+  private: void enterInErrorMode (const U64 inBitCenterSampleNumber, const CanErrorReason inReason) ;
 
   private: void handle_IDLE_state (const bool inBit, const U64 inBitCenterSampleNumber) ;
   private: void handle_IDENTIFIER_state (const bool inBit, const U64 inBitCenterSampleNumber) ;
