@@ -108,9 +108,18 @@ void DecodeDbcSignalsIntoFrame (const DbcMessage & inMsg, const uint8_t * inData
       }
     }
     const uint64_t raw = extractSignalRaw (inData, inDataLen, sig.mStartBit, sig.mLength, sig.mByteOrder == DbcByteOrder::Big) ;
-    const double rawAsNumber = sig.mIsSigned ? double (signExtend (raw, sig.mLength)) : double (raw) ;
-    const double physical = rawAsNumber * sig.mScale + sig.mOffset ;
-    ioFrameV2.AddString (sig.mName.c_str (), formatPhysical (physical, sig.mUnit).c_str ()) ;
+    const int64_t rawSigned = sig.mIsSigned ? signExtend (raw, sig.mLength) : int64_t (raw) ;
+  //--- VAL_ value tables key off the raw (pre-scale) value, matching
+  //    cantools' own semantics -- a match shows the enum name instead of
+  //    a number; no match (the common case, most signals have no value
+  //    table at all) falls straight through to the existing numeric path.
+    const auto valueTableIt = sig.mValueTable.find (rawSigned) ;
+    if (valueTableIt != sig.mValueTable.end ()) {
+      ioFrameV2.AddString (sig.mName.c_str (), valueTableIt->second.c_str ()) ;
+    }else{
+      const double physical = double (rawSigned) * sig.mScale + sig.mOffset ;
+      ioFrameV2.AddString (sig.mName.c_str (), formatPhysical (physical, sig.mUnit).c_str ()) ;
+    }
   }
 }
 
@@ -130,12 +139,27 @@ void DbcDatabase::Clear (void) {
 //----------------------------------------------------------------------------------------
 //  Line-oriented state machine, not a full grammar parser: classify each
 //  line by its leading keyword, BO_ starts a new (locally-built) message
-//  and becomes "current," SG_ attaches a parsed signal to it, everything
-//  else (CM_, BA_, VAL_, BU_, SG_MUL_VAL_, blank lines, ...) is silently
-//  skipped -- matches this feature's "skip unrecognized, don't fail"
-//  scope. Messages are built into a local vector first and merged into
-//  the aggregate map afterward (see LoadFromFolder), so a single file
-//  never partially corrupts the aggregate on a mid-file problem.
+//  and becomes "current," SG_ attaches a parsed signal to it, VAL_ is
+//  stashed for a second resolution pass once every message/signal in the
+//  file is known (see below -- VAL_ lines reference their target by
+//  message ID + signal name, not by file position, and conventionally
+//  appear well after all BO_/SG_ blocks), everything else (CM_, BA_, BU_,
+//  SG_MUL_VAL_, blank lines, ...) is silently skipped -- matches this
+//  feature's "skip unrecognized, don't fail" scope. Messages are built
+//  into a local vector first and merged into the aggregate map afterward
+//  (see LoadFromFolder), so a single file never partially corrupts the
+//  aggregate on a mid-file problem.
+//----------------------------------------------------------------------------------------
+
+namespace {
+  struct PendingValueTable {
+    uint32_t mMessageId ;
+    bool mIsExtended ;
+    std::string mSignalName ;
+    std::unordered_map <int64_t, std::string> mValues ;
+  } ;
+}
+
 //----------------------------------------------------------------------------------------
 
 bool DbcDatabase::LoadOneFile (const std::string & inFilePath) {
@@ -150,8 +174,15 @@ bool DbcDatabase::LoadOneFile (const std::string & inFilePath) {
   static const std::regex sgRegex (
     R"RX(^\s*SG_\s+([A-Za-z_][A-Za-z0-9_]*)\s*(M|m[0-9]+)?\s*:\s*([0-9]+)\|([0-9]+)@([01])([+-])\s*\(\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*\)\s*\[\s*([-+0-9.eE]*)\s*\|\s*([-+0-9.eE]*)\s*\]\s*"([^"]*)"\s*(.*)$)RX"
   ) ;
+  static const std::regex valRegex (
+    R"RX(^\s*VAL_\s+(\d+)\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.*?)\s*;\s*$)RX"
+  ) ;
+  static const std::regex valPairRegex (
+    R"RX((-?[0-9]+)\s*"([^"]*)")RX"
+  ) ;
 
   std::vector <DbcMessage> localMessages ;
+  std::vector <PendingValueTable> pendingValueTables ;
   DbcMessage * currentMessage = nullptr ;
   std::string line ;
   bool firstLine = true ;
@@ -204,8 +235,47 @@ bool DbcDatabase::LoadOneFile (const std::string & inFilePath) {
       sig.mMax = m [10].str ().empty () ? 0.0 : std::stod (m [10].str ()) ;
       sig.mUnit = m [11].str () ;
       currentMessage->mSignals.push_back (sig) ;
+    }else if (std::regex_match (line, m, valRegex)) {
+      PendingValueTable pending ;
+      const uint32_t rawId = uint32_t (std::stoul (m [1].str ())) ;
+    //--- Same extended-ID bit-31 marker convention as BO_ (confirmed
+    //    against cantools' get_dbc_frame_id(), used identically for both
+    //    BO_ and VAL_ output).
+      pending.mIsExtended = (rawId & 0x80000000u) != 0 ;
+      pending.mMessageId = rawId & 0x1FFFFFFFu ;
+      pending.mSignalName = m [2].str () ;
+      const std::string pairsBlob = m [3].str () ;
+      for (auto it = std::sregex_iterator (pairsBlob.begin (), pairsBlob.end (), valPairRegex) ;
+           it != std::sregex_iterator () ; ++ it) {
+        const std::smatch & pairMatch = *it ;
+        const int64_t value = std::stoll (pairMatch [1].str ()) ;
+        pending.mValues [value] = pairMatch [2].str () ;
+      }
+      if (! pending.mValues.empty ()) {
+        pendingValueTables.push_back (std::move (pending)) ;
+      }
     }
-    // else: unrecognized line, skip -- CM_/BA_/VAL_/BU_/SG_MUL_VAL_/blank/etc.
+    // else: unrecognized line, skip -- CM_/BA_/BU_/SG_MUL_VAL_/blank/etc.
+  }
+
+//--- Resolve VAL_ entries now that every message/signal in this file is
+//    known -- VAL_ references its target by (message id, signal name),
+//    not by file position, so this can only happen after the scan above
+//    completes. A VAL_ referencing a message or signal that doesn't
+//    exist in this file is silently skipped, same "don't fail the load"
+//    posture as any other unresolvable line.
+  for (const PendingValueTable & pending : pendingValueTables) {
+    for (DbcMessage & msg : localMessages) {
+      if ((msg.mId == pending.mMessageId) && (msg.mIsExtended == pending.mIsExtended)) {
+        for (DbcSignal & sig : msg.mSignals) {
+          if (sig.mName == pending.mSignalName) {
+            sig.mValueTable = pending.mValues ;
+            break ;
+          }
+        }
+        break ;
+      }
+    }
   }
 
 //--- If a message somehow has more than one 'M' signal, keep the first and

@@ -1,5 +1,41 @@
 #include "CANFDMolinaroAnalyzerSettings.h"
 #include <AnalyzerHelpers.h>
+#include <cctype>
+
+//----------------------------------------------------------------------------------------
+//  Whitespace-tolerant hex-byte-pair parser for the "Fixed Frame Data"
+//  setting (e.g. "01 02 03 04" or "01020304"). Rejects anything that
+//  isn't hex digits/whitespace, an odd digit count, or more than 64
+//  bytes -- reported back through SetErrorText/return false in
+//  SetSettingsFromInterfaces, same contract as the DBC folder path.
+//----------------------------------------------------------------------------------------
+
+static bool parseHexBytes (const std::string & inText, std::vector <uint8_t> & outBytes, std::string & outError) {
+  outBytes.clear () ;
+  std::string digits ;
+  for (const char c : inText) {
+    if (std::isspace (static_cast <unsigned char> (c))) {
+      continue ;
+    }
+    if (! std::isxdigit (static_cast <unsigned char> (c))) {
+      outError = "Fixed Frame Data contains a non-hex character" ;
+      return false ;
+    }
+    digits += c ;
+  }
+  if ((digits.size () % 2) != 0) {
+    outError = "Fixed Frame Data must have an even number of hex digits" ;
+    return false ;
+  }
+  if (digits.size () > 128) {   // 64 bytes max
+    outError = "Fixed Frame Data exceeds 64 bytes" ;
+    return false ;
+  }
+  for (size_t i = 0 ; i < digits.size () ; i += 2) {
+    outBytes.push_back (uint8_t (std::stoul (digits.substr (i, 2), nullptr, 16))) ;
+  }
+  return true ;
+}
 
 //----------------------------------------------------------------------------------------
 
@@ -60,6 +96,33 @@ mDataBitRate (1000 * 1000) {
   mDbcFolderInterface->SetTitleAndTooltip ("DBC Folder (optional)",
                                            "Decode data bytes into named signals using every .dbc file found in this folder.") ;
   mDbcFolderInterface->SetTextType (AnalyzerSettingInterfaceText::FolderPath) ;
+
+//--- Fixed Test Frame -- lets one specific ID+data frame be reproduced on
+//    demand instead of hunting through random simulator output (e.g. to
+//    validate a specific DBC message decodes correctly).
+  mUseFixedTestFrameInterface.reset (new AnalyzerSettingInterfaceNumberList ()) ;
+  mUseFixedTestFrameInterface->SetTitleAndTooltip ("Use Fixed Test Frame", "") ;
+  mUseFixedTestFrameInterface->AddNumber (double (FIXED_TEST_FRAME_DISABLED), "Disabled", "") ;
+  mUseFixedTestFrameInterface->AddNumber (double (FIXED_TEST_FRAME_ENABLED), "Enabled", "") ;
+  mUseFixedTestFrameInterface->SetNumber (double (FIXED_TEST_FRAME_DISABLED)) ;
+
+  mFixedFrameFormatInterface.reset (new AnalyzerSettingInterfaceNumberList ()) ;
+  mFixedFrameFormatInterface->SetTitleAndTooltip ("Fixed Frame ID Format", "") ;
+  mFixedFrameFormatInterface->AddNumber (double (FIXED_FRAME_FORMAT_STANDARD), "Standard", "") ;
+  mFixedFrameFormatInterface->AddNumber (double (FIXED_FRAME_FORMAT_EXTENDED), "Extended", "") ;
+  mFixedFrameFormatInterface->SetNumber (double (FIXED_FRAME_FORMAT_STANDARD)) ;
+
+  mFixedFrameIdInterface.reset (new AnalyzerSettingInterfaceInteger ()) ;
+  mFixedFrameIdInterface->SetTitleAndTooltip ("Fixed Frame ID",
+                                              "Used only when Use Fixed Test Frame is Enabled. Masked to 11 bits if Format is Standard.") ;
+  mFixedFrameIdInterface->SetMax (0x1FFFFFFF) ;
+  mFixedFrameIdInterface->SetMin (0) ;
+  mFixedFrameIdInterface->SetInteger (mFixedFrameId) ;
+
+  mFixedFrameDataInterface.reset (new AnalyzerSettingInterfaceText ()) ;
+  mFixedFrameDataInterface->SetTitleAndTooltip ("Fixed Frame Data (hex bytes)",
+                                                "e.g. \"01 02 03 04\". Used only when Use Fixed Test Frame is Enabled. Up to 64 bytes for CAN FD frames (see Simulator Generated Frames Format), 8 for classic frames -- data is truncated or length-rounded-up to fit whichever the Format setting currently selects.") ;
+  mFixedFrameDataInterface->SetTextType (AnalyzerSettingInterfaceText::NormalText) ;
 
 //--- Add Channel level inversion
   mCanChannelInvertedInterface.reset (new AnalyzerSettingInterfaceNumberList ( )) ;
@@ -141,6 +204,10 @@ mDataBitRate (1000 * 1000) {
   AddInterface (mProtocolInterface.get ());
   AddInterface (mSimulatorRandomSeedInterface.get ());
   AddInterface (mDbcFolderInterface.get ());
+  AddInterface (mUseFixedTestFrameInterface.get ());
+  AddInterface (mFixedFrameFormatInterface.get ());
+  AddInterface (mFixedFrameIdInterface.get ());
+  AddInterface (mFixedFrameDataInterface.get ());
   AddInterface (mSimulatorAckGenerationInterface.get ());
   AddInterface (mSimulatorFrameTypeGenerationInterface.get ());
   AddInterface (mSimulatorBSRGenerationInterface.get ());
@@ -199,6 +266,18 @@ bool CANFDMolinaroAnalyzerSettings::SetSettingsFromInterfaces () {
     }
   }
 
+  mUseFixedTestFrame = U32 (mUseFixedTestFrameInterface->GetNumber ()) == FIXED_TEST_FRAME_ENABLED ;
+  mFixedFrameExtended = U32 (mFixedFrameFormatInterface->GetNumber ()) == FIXED_FRAME_FORMAT_EXTENDED ;
+  mFixedFrameId = mFixedFrameIdInterface->GetInteger () ;
+  { const char * text = mFixedFrameDataInterface->GetText () ;
+    mFixedFrameDataText = text ? text : "" ;
+    std::string err ;
+    if (! parseHexBytes (mFixedFrameDataText, mFixedFrameData, err)) {
+      SetErrorText (err.c_str ()) ;
+      return false ;
+    }
+  }
+
   ClearChannels();
   AddChannel (mInputChannel, "CAN FD", true) ;
 
@@ -221,6 +300,10 @@ void CANFDMolinaroAnalyzerSettings::UpdateInterfacesFromSettings () {
   mSimulatorBSRGenerationInterface->SetNumber (mSimulatorGeneratedBSRSlot) ;
   mSimulatorESIGenerationInterface->SetNumber (mSimulatorGeneratedESISlot) ;
   mDbcFolderInterface->SetText (mDbcFolderPath.c_str ()) ;
+  mUseFixedTestFrameInterface->SetNumber (double (mUseFixedTestFrame ? FIXED_TEST_FRAME_ENABLED : FIXED_TEST_FRAME_DISABLED)) ;
+  mFixedFrameFormatInterface->SetNumber (double (mFixedFrameExtended ? FIXED_FRAME_FORMAT_EXTENDED : FIXED_FRAME_FORMAT_STANDARD)) ;
+  mFixedFrameIdInterface->SetInteger (mFixedFrameId) ;
+  mFixedFrameDataInterface->SetText (mFixedFrameDataText.c_str ()) ;
 }
 
 //----------------------------------------------------------------------------------------
@@ -261,6 +344,16 @@ void CANFDMolinaroAnalyzerSettings::LoadSettings (const char* settings) {
     }
   }
 
+  text_archive >> mUseFixedTestFrame ;
+  text_archive >> mFixedFrameExtended ;
+  text_archive >> mFixedFrameId ;
+  { const char * text = nullptr ;
+    text_archive >> & text ;
+    mFixedFrameDataText = text ? text : "" ;
+    std::string err ;
+    parseHexBytes (mFixedFrameDataText, mFixedFrameData, err) ;   // best-effort on reload, same reasoning as the DBC folder path
+  }
+
   ClearChannels();
   AddChannel( mInputChannel, "CAN FD", true );
 
@@ -282,6 +375,10 @@ const char* CANFDMolinaroAnalyzerSettings::SaveSettings () {
   text_archive << U32 (mSimulatorGeneratedBSRSlot) ;
   text_archive << U32 (mSimulatorGeneratedESISlot) ;
   text_archive << mDbcFolderPath.c_str () ;
+  text_archive << mUseFixedTestFrame ;
+  text_archive << mFixedFrameExtended ;
+  text_archive << mFixedFrameId ;
+  text_archive << mFixedFrameDataText.c_str () ;
 
   return SetReturnString (text_archive.GetString ()) ;
 }

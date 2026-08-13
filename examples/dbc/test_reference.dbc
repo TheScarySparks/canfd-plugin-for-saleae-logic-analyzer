@@ -6,6 +6,40 @@ BS_:
 
 BU_: ECU
 
+CM_ "Reference/example DBC used to validate the CAN 2.0B and CAN FD Logic 2
+plugins' DBC signal decoder. Each message below exercises one specific
+piece of the decoder (byte order, signed values, multiplexing, extended
+IDs, value tables) so it can be checked in isolation. Cross-checked
+against cantools (`cantools decode`) as an independent reference during
+development -- see the plugins' CANDbcParser.cpp for the actual decoder.
+
+DBC syntax quick reference, for anyone reading this file cold:
+
+BO_ <id> <name>: <dlc> <sender>
+  Defines a message. <id> has bit 31 set for extended (29-bit) IDs --
+  e.g. MsgExt below uses id 2147483939 = 0x80000123, meaning extended ID
+  0x123. Standard/extended are separate ID spaces: the same numeric ID
+  can validly exist as both a standard and an extended message.
+
+SG_ <name> [mux] : <start_bit>|<length>@<byte_order><sign> (<scale>,<offset>) [<min>|<max>] \"<unit>\" <receivers>
+  Defines a signal within the preceding message.
+    mux         -- omitted for a plain signal; 'M' marks the one
+                   multiplexor/selector signal in a message; 'm<n>' marks
+                   a signal that only applies when the selector's value
+                   equals <n>.
+    byte_order  -- '0' = Motorola/big-endian, '1' = Intel/little-endian.
+                   Easy to get backwards (several otherwise-reputable
+                   write-ups state it the other way round) -- this
+                   pairing is verified against cantools' own parser
+                   source, not assumed.
+    sign        -- '+' = unsigned, '-' = signed.
+    physical value = raw * scale + offset.
+
+VAL_ <msgId> <signalName> <value> \"<name>\" ... ;
+  A value table: shows <name> instead of a number when the signal's raw
+  (pre-scale) value matches. <msgId> uses the same extended-ID bit-31
+  marker as BO_." ;
+
 BO_ 256 MsgIntel: 8 ECU
  SG_ SigIntel : 0|16@1+ (0.1,0) [0|0] "degC" ECU
 
@@ -28,3 +62,35 @@ BO_ 2147483939 MsgExt: 4 ECU
 
 BO_ 1886 MsgSmokeTest: 8 ECU
  SG_ SigSmokeTest : 0|8@1+ (1,0) [0|0] "" ECU
+
+BO_ 300 MsgValTable: 8 ECU
+ SG_ SigState : 0|8@1+ (1,0) [0|0] "" ECU
+
+CM_ BO_ 256 "Intel (little-endian) byte order, plus a non-trivial scale (0.1) and a unit string." ;
+CM_ SG_ 256 SigIntel "16-bit Intel signal spanning bytes 0-1. raw=4660 (0x1234) -> physical=466.0 degC." ;
+
+CM_ BO_ 257 "Motorola (big-endian) byte order, full-byte-aligned (occupies exactly byte 2, no partial bits)." ;
+CM_ SG_ 257 SigMotoFullByte "8-bit Motorola signal aligned to a whole byte -- the simple case, sanity-checks the byte-order bit itself before testing the harder boundary-crossing case below." ;
+
+CM_ BO_ 258 "Motorola byte order, deliberately NOT byte-aligned -- this is the case most third-party DBC decoders get wrong." ;
+CM_ SG_ 258 SigMotoCross "12-bit Motorola signal starting mid-byte and crossing a byte boundary at a non-zero bit offset. Motorola's start-bit numbering walks backwards and jumps +15 (not -1) across a byte boundary -- this signal only decodes correctly if that's implemented right." ;
+
+CM_ BO_ 259 "Signed value with a non-zero offset." ;
+CM_ SG_ 259 SigSigned "8-bit signed Intel signal, offset -10. raw byte 0xF6 -> signed raw -10 -> physical (-10*1 + -10) = -20. Confirms two's-complement sign extension AND offset application together." ;
+
+CM_ BO_ 512 "Simple multiplexing: one selector signal (SigMuxSel), two signals that only apply for one selector value each." ;
+CM_ SG_ 512 SigMuxSel "The 'M' multiplexor -- must be decoded before SigA/SigB can be resolved." ;
+CM_ SG_ 512 SigA "'m0' -- only present in the decoded output when SigMuxSel == 0." ;
+CM_ SG_ 512 SigB "'m1' -- only present when SigMuxSel == 1. Also has a different scale (2, vs SigA's 1) to confirm the right signal's own scale/offset gets used, not a mix-up between the two." ;
+
+CM_ BO_ 2147483939 "Extended (29-bit) ID -- id field 2147483939 = 0x80000123 = bit 31 set + ID 0x123. Also carries a VAL_ entry (below) to confirm VAL_'s message-id field uses the same extended-ID marking as BO_'s." ;
+CM_ SG_ 2147483939 SigExt "raw 22136 (0x5678) has a matching VAL_ entry (\"Magic\"); any other value falls back to the plain number, confirming the value-table lookup only overrides matched values." ;
+
+CM_ BO_ 1886 "Not a byte-order/edge-case test -- this is a manually-added smoke-test frame, ID 0x75E, matched to a real frame observed from the simulator during initial end-to-end testing (there's no way to control which ID the simulator's random generator picks, so a real observed frame was hand-matched here to confirm decoding end-to-end). Superseded by the plugins' \"Fixed Test Frame\" simulator setting, which can now reproduce a chosen ID/data directly." ;
+CM_ SG_ 1886 SigSmokeTest "Reads data byte 0 directly, unscaled -- decodes to 1 for data \"01 00 00 00 00 00 00 00\"." ;
+
+CM_ BO_ 300 "VAL_ value tables: raw value -> human-readable name." ;
+CM_ SG_ 300 SigState "0/1 have VAL_ entries (\"Off\"/\"On\"); 2 (\"Fault\") is defined but not exercised by the harness. Any value without an entry (e.g. 5) falls back to the plain number." ;
+
+VAL_ 300 SigState 0 "Off" 1 "On" 2 "Fault" ;
+VAL_ 2147483939 SigExt 22136 "Magic" ;

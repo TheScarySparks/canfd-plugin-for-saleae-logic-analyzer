@@ -6,6 +6,8 @@
 #include <AnalyzerSettings.h>
 #include <AnalyzerTypes.h>
 #include <string>
+#include <vector>
+#include <cstdint>
 #include "CANDbcParser.h"
 
 //----------------------------------------------------------------------------------------
@@ -36,6 +38,14 @@ typedef enum {
   GENERATE_ONLY_CANFD_BASE_20_64,
   GENERATE_ONLY_CANFD_EXTENDED_20_64
 } SimulatorGeneratedFrameType ;
+
+//----------------------------------------------------------------------------------------
+
+static const U32 FIXED_TEST_FRAME_DISABLED = 0 ;
+static const U32 FIXED_TEST_FRAME_ENABLED = 1 ;
+
+static const U32 FIXED_FRAME_FORMAT_STANDARD = 0 ;
+static const U32 FIXED_FRAME_FORMAT_EXTENDED = 1 ;
 
 //----------------------------------------------------------------------------------------
 
@@ -92,6 +102,11 @@ public:
 
   public: const DbcDatabase & dbcDatabase (void) const { return mDbcDatabase ; }
 
+  public: bool useFixedTestFrame (void) const { return mUseFixedTestFrame ; }
+  public: bool fixedFrameExtended (void) const { return mFixedFrameExtended ; }
+  public: U32 fixedFrameId (void) const { return mFixedFrameId ; }
+  public: const std::vector <uint8_t> & fixedFrameData (void) const { return mFixedFrameData ; }
+
   protected: std::shared_ptr <AnalyzerSettingInterfaceChannel> mInputChannelInterface ;
   protected: std::shared_ptr <AnalyzerSettingInterfaceInteger> mArbitrationBitRateInterface ;
   protected: std::shared_ptr <AnalyzerSettingInterfaceInteger> mDataBitRateInterface ;
@@ -105,6 +120,10 @@ public:
   protected: std::shared_ptr <AnalyzerSettingInterfaceNumberList> mProtocolInterface ;
   protected: std::shared_ptr <AnalyzerSettingInterfaceInteger> mSimulatorRandomSeedInterface ;
   protected: std::shared_ptr <AnalyzerSettingInterfaceText> mDbcFolderInterface ;
+  protected: std::shared_ptr <AnalyzerSettingInterfaceNumberList> mUseFixedTestFrameInterface ;
+  protected: std::shared_ptr <AnalyzerSettingInterfaceNumberList> mFixedFrameFormatInterface ;
+  protected: std::shared_ptr <AnalyzerSettingInterfaceInteger> mFixedFrameIdInterface ;
+  protected: std::shared_ptr <AnalyzerSettingInterfaceText> mFixedFrameDataInterface ;
 
   protected: U32 mArbitrationBitRate ;
   protected: U32 mDataBitRate ;
@@ -119,6 +138,11 @@ public:
   protected: bool mInverted = true ;
   protected: std::string mDbcFolderPath ;
   protected: DbcDatabase mDbcDatabase ;
+  protected: bool mUseFixedTestFrame = false ;
+  protected: bool mFixedFrameExtended = false ;
+  protected: U32 mFixedFrameId = 0 ;
+  protected: std::string mFixedFrameDataText ;
+  protected: std::vector <uint8_t> mFixedFrameData ;
 };
 
 //----------------------------------------------------------------------------------------

@@ -13,10 +13,11 @@
 //----------------------------------------------------------------------------------------
 //  In-memory representation of a (subset of a) Vector DBC file: plain
 //  signals plus *simple* multiplexing only (one 'M' selector per message,
-//  'm<n>' signals gated on its value). Extended/multiple multiplexing
-//  (SG_MUL_VAL_), VAL_ value tables, comments and attributes are not
-//  parsed -- those lines are silently skipped, same as any other
-//  unrecognized line, rather than failing the whole load.
+//  'm<n>' signals gated on its value), plus VAL_ value tables (raw value
+//  -> human-readable name). Extended/multiple multiplexing (SG_MUL_VAL_),
+//  comments and attributes are not parsed -- those lines are silently
+//  skipped, same as any other unrecognized line, rather than failing the
+//  whole load.
 //----------------------------------------------------------------------------------------
 
 enum class DbcByteOrder : uint8_t { Little, Big } ;                     // '@1' / '@0' -- verified against cantools' DBC parser source, NOT the '@0'/'@1' pairing several third-party writeups state
@@ -37,6 +38,7 @@ struct DbcSignal {
   std::string  mUnit ;
   DbcMuxRole   mMuxRole = DbcMuxRole::None ;
   int          mMuxValue = -1 ;   // only meaningful when mMuxRole == Multiplexed
+  std::unordered_map <int64_t, std::string> mValueTable ;   // raw value -> name, from VAL_ ; empty = no value table, decode falls back to numeric formatting
 } ;
 
 //----------------------------------------------------------------------------------------

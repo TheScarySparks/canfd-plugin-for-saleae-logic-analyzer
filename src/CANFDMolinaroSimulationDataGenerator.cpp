@@ -591,6 +591,15 @@ void CANMolinaroSimulationDataGenerator::createCANFrame
     extended = true ;
     break ;
   }
+//--- Fixed Test Frame overrides ID format and forces a data frame (a
+//    remote frame has no data field to fix) -- frame category (classic
+//    vs FD, length class -- the switch above) is otherwise unaffected,
+//    so picking a specific dropdown option still controls what gets
+//    generated around the fixed ID/data.
+  if (mSettings->useFixedTestFrame ()) {
+    extended = mSettings->fixedFrameExtended () ;
+    remoteFrame = false ;
+  }
 //--- Select ACK SLOT level
   AckSlot ack = AckSlot::ACK_SLOT_DOMINANT ;
   switch (mSettings->generatedAckSlot ()) {
@@ -611,6 +620,23 @@ void CANMolinaroSimulationDataGenerator::createCANFrame
   }
 //--- We need to end recessive
   mSerialSimulationData.TransitionIfNeeded (inInverted ? BIT_LOW : BIT_HIGH) ;
+}
+
+//----------------------------------------------------------------------------------------
+
+//----------------------------------------------------------------------------------------
+//  Inverse of CANFDFrameBitsGenerator::lengthForCode: given a byte count,
+//  find the smallest valid CAN FD length code whose byte count is >= it
+//  (round up to the nearest length a real sender could transmit).
+//----------------------------------------------------------------------------------------
+
+static uint8_t codeForByteCount (const uint8_t inByteCount) {
+  for (uint8_t code = 0 ; code < 16 ; code ++) {
+    if (CANFDFrameBitsGenerator::lengthForCode (code) >= inByteCount) {
+      return code ;
+    }
+  }
+  return 15 ;   // inByteCount > 64, clamp to the max
 }
 
 //----------------------------------------------------------------------------------------
@@ -649,12 +675,30 @@ void CANMolinaroSimulationDataGenerator::createCANFD_Frame
 //---
   uint8_t data [64] ;
   const FrameFormat format = inExtended ? FrameFormat::extendedFrame : FrameFormat::standardFrame ;
-  const uint32_t identifier = uint32_t (pseudoRandomValue ()) & (inExtended ? 0x1FFFFFFF : 0x7FF) ;
-  const uint8_t dataLengthCode = in_canfd_24_64
-    ? (uint8_t (pseudoRandomValue ()) % 5 + 11) // 11, ..., 15
-    : (uint8_t (pseudoRandomValue ()) % 11) ;   // 0 ... 105
-  for (uint32_t i=0 ; i<CANFDFrameBitsGenerator::lengthForCode (dataLengthCode) ; i++) {
-    data [i] = uint8_t (pseudoRandomValue ()) ;
+  uint32_t identifier ;
+  uint8_t dataLengthCode ;
+  if (mSettings->useFixedTestFrame ()) {
+    identifier = mSettings->fixedFrameId () & (inExtended ? 0x1FFFFFFF : 0x7FF) ;
+    const std::vector <uint8_t> & fixedData = mSettings->fixedFrameData () ;
+    const uint8_t byteCount = uint8_t ((fixedData.size () > 64) ? 64 : fixedData.size ()) ;
+  //--- Round the fixed data's byte count UP to the nearest length a real
+  //    CAN FD sender could actually transmit (0,1,2...8,12,16,...,64 --
+  //    the DLC nibble can't represent every byte count) -- extra bytes
+  //    beyond what was supplied are zero-padded, same as a real sender
+  //    would need to do.
+    dataLengthCode = codeForByteCount (byteCount) ;
+    const uint8_t roundedByteCount = CANFDFrameBitsGenerator::lengthForCode (dataLengthCode) ;
+    for (uint32_t i=0 ; i<roundedByteCount ; i++) {
+      data [i] = (i < byteCount) ? fixedData [i] : 0 ;
+    }
+  }else{
+    identifier = uint32_t (pseudoRandomValue ()) & (inExtended ? 0x1FFFFFFF : 0x7FF) ;
+    dataLengthCode = in_canfd_24_64
+      ? (uint8_t (pseudoRandomValue ()) % 5 + 11) // 11, ..., 15
+      : (uint8_t (pseudoRandomValue ()) % 11) ;   // 0 ... 105
+    for (uint32_t i=0 ; i<CANFDFrameBitsGenerator::lengthForCode (dataLengthCode) ; i++) {
+      data [i] = uint8_t (pseudoRandomValue ()) ;
+    }
   }
   const ProtocolSetting protocol = mSettings->protocol () ;
   const CANFDFrameBitsGenerator frame (identifier, format, protocol, dataLengthCode, bsr, data, inAck, esi) ;
@@ -696,14 +740,25 @@ void CANMolinaroSimulationDataGenerator::createBaseCANFrame (const U32 inSamples
   uint8_t data [8] ;
   const FrameFormat format = inExtended ? FrameFormat::extendedFrame : FrameFormat::standardFrame ;
   const FrameType type = inRemote ? FrameType::remoteFrame : FrameType::dataFrame ;
-  const uint32_t identifier = uint32_t (pseudoRandomValue ()) & (inExtended ? 0x1FFFFFFF : 0x7FF) ;
-  const uint8_t dataLength = uint8_t (pseudoRandomValue ()) % 9 ;
-  if (! inRemote) { // was "! remoteFrame", which always evaluated true (a
-                     // shadowed enum value, not the inRemote parameter) --
-                     // meaning remote frames never actually skipped filling
-                     // data[] with random bytes they shouldn't carry
+  uint32_t identifier ;
+  uint8_t dataLength ;
+  if (mSettings->useFixedTestFrame ()) {
+    identifier = mSettings->fixedFrameId () & (inExtended ? 0x1FFFFFFF : 0x7FF) ;
+    const std::vector <uint8_t> & fixedData = mSettings->fixedFrameData () ;
+    dataLength = uint8_t ((fixedData.size () > 8) ? 8 : fixedData.size ()) ;
     for (uint32_t i=0 ; i<dataLength ; i++) {
-      data [i] = uint8_t (pseudoRandomValue ()) ;
+      data [i] = fixedData [i] ;
+    }
+  }else{
+    identifier = uint32_t (pseudoRandomValue ()) & (inExtended ? 0x1FFFFFFF : 0x7FF) ;
+    dataLength = uint8_t (pseudoRandomValue ()) % 9 ;
+    if (! inRemote) { // was "! remoteFrame", which always evaluated true (a
+                       // shadowed enum value, not the inRemote parameter) --
+                       // meaning remote frames never actually skipped filling
+                       // data[] with random bytes they shouldn't carry
+      for (uint32_t i=0 ; i<dataLength ; i++) {
+        data [i] = uint8_t (pseudoRandomValue ()) ;
+      }
     }
   }
   const CANFrameBitsGenerator frame (identifier, format, dataLength, data, type, inAck) ;
