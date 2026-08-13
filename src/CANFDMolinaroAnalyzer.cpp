@@ -893,6 +893,12 @@ void CANFDMolinaroAnalyzer::emitConsolidatedFrameV2 (const U64 inEndSampleNumber
       ? std::string ()
       : formatData (mData, dlcByteCount) ;
     frameV2.AddString ("DATA", dataStr.c_str ()) ;
+    if (mFrameType != FrameType::remote) {
+      const DbcMessage * dbcMsg = mSettings->dbcDatabase ().FindMessage (mIdentifier, mFrameFormat == FrameFormat::extended) ;
+      if (dbcMsg != nullptr) {
+        DecodeDbcSignalsIntoFrame (*dbcMsg, mData, int (dlcByteCount), frameV2) ;
+      }
+    }
   }else{
     frameV2.AddString ("ID", "?") ;
   }

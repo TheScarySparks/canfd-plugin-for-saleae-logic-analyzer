@@ -54,6 +54,13 @@ mDataBitRate (1000 * 1000) {
   mDataSamplePointInterface->SetMin (50) ;
   mDataSamplePointInterface->SetInteger (mDataSamplePoint) ;
 
+//--- DBC Folder -- optional, decodes DATA bytes into named signals using
+//    every .dbc file found in the folder. Empty = feature off.
+  mDbcFolderInterface.reset (new AnalyzerSettingInterfaceText ()) ;
+  mDbcFolderInterface->SetTitleAndTooltip ("DBC Folder (optional)",
+                                           "Decode data bytes into named signals using every .dbc file found in this folder.") ;
+  mDbcFolderInterface->SetTextType (AnalyzerSettingInterfaceText::FolderPath) ;
+
 //--- Add Channel level inversion
   mCanChannelInvertedInterface.reset (new AnalyzerSettingInterfaceNumberList ( )) ;
   mCanChannelInvertedInterface->SetTitleAndTooltip ("Dominant Logic Level", "" );
@@ -133,6 +140,7 @@ mDataBitRate (1000 * 1000) {
   AddInterface (mDataSamplePointInterface.get ());
   AddInterface (mProtocolInterface.get ());
   AddInterface (mSimulatorRandomSeedInterface.get ());
+  AddInterface (mDbcFolderInterface.get ());
   AddInterface (mSimulatorAckGenerationInterface.get ());
   AddInterface (mSimulatorFrameTypeGenerationInterface.get ());
   AddInterface (mSimulatorBSRGenerationInterface.get ());
@@ -178,6 +186,19 @@ bool CANFDMolinaroAnalyzerSettings::SetSettingsFromInterfaces () {
   mSimulatorGeneratedESISlot
     = SimulatorGeneratedBit (mSimulatorESIGenerationInterface->GetNumber ()) ;
 
+  { const char * path = mDbcFolderInterface->GetText () ;
+    mDbcFolderPath = path ? path : "" ;
+    if (! mDbcFolderPath.empty ()) {
+      std::string err ;
+      if (! mDbcDatabase.LoadFromFolder (mDbcFolderPath, err)) {
+        SetErrorText (err.c_str ()) ;
+        return false ;
+      }
+    }else{
+      mDbcDatabase.Clear () ;
+    }
+  }
+
   ClearChannels();
   AddChannel (mInputChannel, "CAN FD", true) ;
 
@@ -199,6 +220,7 @@ void CANFDMolinaroAnalyzerSettings::UpdateInterfacesFromSettings () {
   mSimulatorFrameTypeGenerationInterface->SetNumber (mSimulatorGeneratedFrameType) ;
   mSimulatorBSRGenerationInterface->SetNumber (mSimulatorGeneratedBSRSlot) ;
   mSimulatorESIGenerationInterface->SetNumber (mSimulatorGeneratedESISlot) ;
+  mDbcFolderInterface->SetText (mDbcFolderPath.c_str ()) ;
 }
 
 //----------------------------------------------------------------------------------------
@@ -230,6 +252,15 @@ void CANFDMolinaroAnalyzerSettings::LoadSettings (const char* settings) {
   text_archive >> value ;
   mSimulatorGeneratedBSRSlot = SimulatorGeneratedBit (value) ;
 
+  { const char * path = nullptr ;
+    text_archive >> & path ;   // absent in archives saved before this setting existed -- path stays nullptr, treated as "off"
+    mDbcFolderPath = path ? path : "" ;
+    if (! mDbcFolderPath.empty ()) {
+      std::string err ;
+      mDbcDatabase.LoadFromFolder (mDbcFolderPath, err) ;   // best-effort on reload -- e.g. the folder may have moved since the capture was saved; no way to surface SetErrorText from here
+    }
+  }
+
   ClearChannels();
   AddChannel( mInputChannel, "CAN FD", true );
 
@@ -250,6 +281,7 @@ const char* CANFDMolinaroAnalyzerSettings::SaveSettings () {
   text_archive << U32 (mSimulatorGeneratedFrameType) ;
   text_archive << U32 (mSimulatorGeneratedBSRSlot) ;
   text_archive << U32 (mSimulatorGeneratedESISlot) ;
+  text_archive << mDbcFolderPath.c_str () ;
 
   return SetReturnString (text_archive.GetString ()) ;
 }

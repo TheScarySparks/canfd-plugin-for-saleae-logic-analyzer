@@ -13,6 +13,8 @@ set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 include(ExternalAnalyzerSDK)
 
 set(SOURCES
+src/CANDbcParser.cpp
+src/CANDbcParser.h
 src/CANFDMolinaroAnalyzer.cpp
 src/CANFDMolinaroAnalyzer.h
 src/CANFDMolinaroAnalyzerResults.cpp

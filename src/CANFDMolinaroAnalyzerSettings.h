@@ -5,6 +5,8 @@
 
 #include <AnalyzerSettings.h>
 #include <AnalyzerTypes.h>
+#include <string>
+#include "CANDbcParser.h"
 
 //----------------------------------------------------------------------------------------
 
@@ -88,6 +90,8 @@ public:
    return mDataSamplePoint ;
   }
 
+  public: const DbcDatabase & dbcDatabase (void) const { return mDbcDatabase ; }
+
   protected: std::shared_ptr <AnalyzerSettingInterfaceChannel> mInputChannelInterface ;
   protected: std::shared_ptr <AnalyzerSettingInterfaceInteger> mArbitrationBitRateInterface ;
   protected: std::shared_ptr <AnalyzerSettingInterfaceInteger> mDataBitRateInterface ;
@@ -100,6 +104,7 @@ public:
   protected: std::shared_ptr <AnalyzerSettingInterfaceNumberList> mSimulatorFrameTypeGenerationInterface ;
   protected: std::shared_ptr <AnalyzerSettingInterfaceNumberList> mProtocolInterface ;
   protected: std::shared_ptr <AnalyzerSettingInterfaceInteger> mSimulatorRandomSeedInterface ;
+  protected: std::shared_ptr <AnalyzerSettingInterfaceText> mDbcFolderInterface ;
 
   protected: U32 mArbitrationBitRate ;
   protected: U32 mDataBitRate ;
@@ -112,6 +117,8 @@ public:
   protected: SimulatorGeneratedFrameType mSimulatorGeneratedFrameType = GENERATE_ALL_FRAME_TYPES ;
   protected: ProtocolSetting mProtocol = CANFD_ISO_PROTOCOL ;
   protected: bool mInverted = true ;
+  protected: std::string mDbcFolderPath ;
+  protected: DbcDatabase mDbcDatabase ;
 };
 
 //----------------------------------------------------------------------------------------
